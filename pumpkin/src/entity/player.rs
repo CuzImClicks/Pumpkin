@@ -495,7 +495,7 @@ impl Player {
 
         let attack_type = AttackType::new(self, attack_cooldown_progress as f32).await;
 
-        if matches!(attack_type, AttackType::Critical) {
+        if attack_type == AttackType::Critical {
             damage *= 1.5;
         }
 
@@ -1282,6 +1282,23 @@ impl Player {
 
     async fn handle_killed(&self) {
         self.set_client_loaded(false);
+        let world = self.world().await;
+        let block_pos = self.position().to_block_pos();
+        for slot in &self.inventory.main_inventory {
+            let mut slot_lock = slot.lock().await;
+            let item_stack = ItemStack::new(slot_lock.item_count, slot_lock.item);
+            *slot_lock = ItemStack::EMPTY;
+            world.drop_stack(&block_pos, item_stack).await;
+        }
+        for stack in self.inventory.entity_equipment.lock().await.equipment.values() {
+            let mut stack_lock = stack.lock().await;
+            world.drop_stack(&block_pos, *stack_lock).await;
+            *stack_lock = ItemStack::EMPTY;
+        }
+        self.hunger_manager.level.store(20);
+        self.hunger_manager.exhaustion.store(0.0);
+        self.hunger_manager.saturation.store(5.0);
+        self.hunger_manager.tick_timer.store(0);
         self.client
             .send_packet_now(&CCombatDeath::new(
                 self.entity_id().into(),

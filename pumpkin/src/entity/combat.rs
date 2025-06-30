@@ -10,7 +10,7 @@ use crate::{
     world::World,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttackType {
     Knockback,
     Critical,

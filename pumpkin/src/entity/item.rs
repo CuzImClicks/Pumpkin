@@ -1,6 +1,9 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicU32, Ordering::Relaxed},
+    atomic::{
+        AtomicU32,
+        Ordering::{self, Relaxed},
+    },
 };
 
 use async_trait::async_trait;
@@ -98,6 +101,7 @@ impl EntityBase for ItemEntity {
         };
 
         if can_pickup
+            && player.client_loaded.load(Ordering::Relaxed)
             && player
                 .inventory
                 .insert_stack_anywhere(&mut *self.item_stack.lock().await)
