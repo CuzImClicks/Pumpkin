@@ -67,6 +67,7 @@ use crate::block::blocks::redstone::tripwire::TripwireBlock;
 use crate::block::blocks::redstone::tripwire_hook::TripwireHookBlock;
 use crate::block::blocks::signs::SignBlock;
 use crate::block::blocks::slabs::SlabBlock;
+use crate::block::blocks::snow::LayeredSnowBlock;
 use crate::block::blocks::spawner::SpawnerBlock;
 use crate::block::blocks::stairs::StairBlock;
 use crate::block::blocks::tnt::TNTBlock;
@@ -224,6 +225,7 @@ pub fn default_registry() -> Arc<BlockRegistry> {
     manager.register(EndRodBlock);
     manager.register(BarrierBlock);
     manager.register(MangroveRootsBlock);
+    manager.register(LayeredSnowBlock);
 
     manager.register(FallingBlock);
 
@@ -304,9 +306,9 @@ impl BlockRegistryExt for BlockRegistry {
     fn can_place_at(
         &self,
         block: &pumpkin_data::Block,
+        state: &BlockState,
         block_accessor: &dyn BlockAccessor,
         block_pos: &BlockPos,
-        face: BlockDirection,
     ) -> bool {
         futures::executor::block_on(async move {
             self.can_place_at(
@@ -315,8 +317,8 @@ impl BlockRegistryExt for BlockRegistry {
                 block_accessor,
                 None,
                 block,
+                state,
                 block_pos,
-                face,
                 None,
             )
             .await
@@ -491,8 +493,8 @@ impl BlockRegistry {
         block_accessor: &dyn BlockAccessor,
         player: Option<&Player>,
         block: &Block,
+        state: &BlockState,
         position: &BlockPos,
-        direction: BlockDirection,
         use_item_on: Option<&SUseItemOn>,
     ) -> bool {
         let pumpkin_block = self.get_pumpkin_block(block);
@@ -503,8 +505,8 @@ impl BlockRegistry {
                     world,
                     block_accessor,
                     block,
+                    state,
                     position,
-                    direction,
                     player,
                     use_item_on,
                 })
