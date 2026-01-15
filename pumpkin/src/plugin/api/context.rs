@@ -290,7 +290,7 @@ impl Context {
     }
 
     /// Initializes logging via the log crate for the plugin.
-    /// Note: Logging is now handled by the tracing system with LogTracer bridge.
+    /// Note: Logging is now handled by the tracing system with `LogTracer` bridge.
     /// This method is kept for compatibility but does nothing since logging
     /// should be initialized globally.
     pub fn init_log(&self) {
