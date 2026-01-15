@@ -347,13 +347,12 @@ pub async fn get_random_pos_within(
 
     let x = (chunk_pos.x << 4) + rng.next_bounded_i32(16);
     let z = (chunk_pos.y << 4) + rng.next_bounded_i32(16);
-    let temp_y =
-        chunk
-            .read()
-            .await
-            .heightmap
-            .get_height(ChunkHeightmapType::WorldSurface, x, z, min_y)
-            + 1;
+    let temp_y = chunk
+        .read()
+        .await
+        .heightmap
+        .get(ChunkHeightmapType::WorldSurface, x, z, min_y)
+        + 1;
     let y = rng.next_inbetween_i32(min_y, temp_y);
     BlockPos::new(x, y, z)
 }
@@ -568,6 +567,7 @@ pub async fn is_valid_spawn_position_for_type(
             &EntityDimensions {
                 width: entity_type.dimension[0],
                 height: entity_type.dimension[1],
+                eye_height: entity_type.eye_height,
             },
         ))
         .await

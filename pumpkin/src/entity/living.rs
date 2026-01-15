@@ -5,6 +5,7 @@ use pumpkin_inventory::build_equipment_slots;
 use pumpkin_inventory::player::player_inventory::PlayerInventory;
 use pumpkin_util::Hand;
 use pumpkin_util::math::position::BlockPos;
+use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{
@@ -637,7 +638,7 @@ impl LivingEntity {
     }
 
     pub fn get_swim_height(&self) -> f64 {
-        let eye_height = self.entity.standing_eye_height;
+        let eye_height = self.entity.entity_dimension.load().eye_height;
 
         if self.entity.entity_type == &EntityType::BREEZE {
             f64::from(eye_height)
@@ -808,9 +809,21 @@ impl LivingEntity {
             self.drop_loot(params).await;
             self.entity.pose.store(EntityPose::Dying);
 
-            let level_info = world.level_info.read().await;
-            let game_rules = &level_info.game_rules;
-            if self.entity.entity_type == &EntityType::PLAYER && game_rules.show_death_messages {
+            let block_pos = self.entity.block_pos.load();
+
+            for slot in self.equipment_slots.values() {
+                let item = {
+                    let lock = self.entity_equipment.lock().await;
+                    let equipment = lock.get(slot);
+                    let mut item_lock = equipment.lock().await;
+                    mem::replace(&mut *item_lock, ItemStack::EMPTY.clone())
+                };
+                world.drop_stack(&block_pos, item).await;
+            }
+
+            let show_death_messages =
+                { world.level_info.read().await.game_rules.show_death_messages };
+            if self.entity.entity_type == &EntityType::PLAYER && show_death_messages {
                 //TODO: KillCredit
                 let death_message =
                     Self::get_death_message(&*dyn_self, damage_type, source, cause).await;
