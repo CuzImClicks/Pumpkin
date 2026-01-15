@@ -394,8 +394,10 @@ impl PumpkinServer {
 
         // Explicitly drop the line reader to return the terminal to the original state.
         if let Some(rl_storage) = LOGGER_IMPL.wait()
-            && let Some(rl) = rl_storage.lock().await.take()
+            && let Some(mut rl) = rl_storage.lock().await.take()
         {
+            log::info!("The server has stopped.");
+            rl.flush().expect("Failed to flush for final time!");
             drop(rl);
         }
     }
