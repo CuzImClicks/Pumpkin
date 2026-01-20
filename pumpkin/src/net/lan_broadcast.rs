@@ -55,12 +55,9 @@ impl LANBroadcast {
         );
 
         while !SHOULD_STOP.load(Ordering::Relaxed) {
-            let t1 = interval.tick();
-            let t2 = STOP_INTERRUPT.notified();
-
             let should_continue = select! {
-                _ = t1 => true,
-                () = t2 => false,
+                _ = interval.tick() => true,
+                () = STOP_INTERRUPT.cancelled() => false,
             };
 
             if !should_continue {

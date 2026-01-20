@@ -23,9 +23,11 @@ use std::time::Duration;
 use std::{net::SocketAddr, sync::LazyLock};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::select;
-use tokio::sync::{Mutex as TokioMutex, Notify, RwLock};
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_log::LogTracer;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -36,7 +38,6 @@ pub mod data;
 pub mod entity;
 pub mod error;
 pub mod item;
-pub mod logging;
 pub mod net;
 pub mod plugin;
 pub mod server;
@@ -54,11 +55,13 @@ pub static PERMISSION_MANAGER: LazyLock<Arc<RwLock<PermissionManager>>> = LazyLo
     )))
 });
 
+const LOG_DIR: &str = "logs";
+
 pub type LoggerOption = Option<Arc<TokioMutex<Option<Readline>>>>;
 pub static LOGGER_IMPL: LazyLock<Arc<OnceLock<LoggerOption>>> =
     LazyLock::new(|| Arc::new(OnceLock::new()));
 
-pub fn init_logger(advanced_config: &AdvancedConfiguration) {
+fn init_logger(advanced_config: &AdvancedConfiguration) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_default_env().unwrap_or(EnvFilter::new("info"));
 
     if advanced_config.logging.enabled {
@@ -87,11 +90,23 @@ pub fn init_logger(advanced_config: &AdvancedConfiguration) {
             .with_ansi(advanced_config.logging.color)
             .with_thread_ids(advanced_config.logging.threads)
             .with_target(true)
+            .with_filter(filter.clone());
+
+        let file_appender =
+            tracing_appender::rolling::daily(LOG_DIR, advanced_config.logging.file.clone());
+        let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(file_writer)
+            .with_ansi(false)
+            .with_thread_ids(advanced_config.logging.threads)
+            .with_target(true)
             .with_filter(filter);
 
-        let subscriber = tracing_subscriber::registry().with(console_layer);
+        let registry = tracing_subscriber::registry()
+            .with(console_layer)
+            .with(file_layer);
 
-        tracing::subscriber::set_global_default(subscriber)
+        tracing::subscriber::set_global_default(registry)
             .expect("Failed to set tracing subscriber");
 
         LogTracer::init().expect("Failed to set LogTracer");
@@ -99,6 +114,7 @@ pub fn init_logger(advanced_config: &AdvancedConfiguration) {
         if LOGGER_IMPL.set(Some(rl_storage)).is_err() {
             panic!("Failed to set logger. Already initialized");
         }
+        Some(file_guard)
     } else {
         let subscriber = tracing_subscriber::registry()
             .with(fmt::Layer::default().with_filter(tracing_subscriber::filter::LevelFilter::OFF));
@@ -111,98 +127,16 @@ pub fn init_logger(advanced_config: &AdvancedConfiguration) {
         if LOGGER_IMPL.set(None).is_err() {
             panic!("Failed to set logger. Already initialized");
         }
-    }
-
-    /* Old implementation
-    let logger = if advanced_config.logging.enabled {
-        let mut config = ConfigBuilder::new();
-
-        if advanced_config.logging.timestamp {
-            config.set_time_format_custom(time::macros::format_description!(
-                "[year]-[month]-[day] [hour]:[minute]:[second]"
-            ));
-            config.set_time_level(LevelFilter::Error);
-            let _ = config.set_time_offset_to_local();
-        } else {
-            config.set_time_level(LevelFilter::Off);
-        }
-
-        if !advanced_config.logging.color {
-            for level in Level::iter() {
-                config.set_level_color(level, None);
-            }
-        } else {
-            // We are technically logging to a file-like object.
-            config.set_write_log_enable_colors(true);
-        }
-
-        if !advanced_config.logging.threads {
-            config.set_thread_level(LevelFilter::Off);
-        } else {
-            config.set_thread_level(LevelFilter::Info);
-        }
-
-        let level = std::env::var("RUST_LOG")
-            .ok()
-            .as_deref()
-            .map(LevelFilter::from_str)
-            .and_then(Result::ok)
-            .unwrap_or(LevelFilter::Info);
-
-        let file_logger: Option<Box<dyn SharedLogger + 'static>> =
-            if advanced_config.logging.file.is_empty() {
-                None
-            } else {
-                Some(
-                    GzipRollingLogger::new(
-                        level,
-                        {
-                            let mut config = config.clone();
-                            for level in Level::iter() {
-                                config.set_level_color(level, None);
-                            }
-                            config.build()
-                        },
-                        advanced_config.logging.file.clone(),
-                    )
-                    .expect("Failed to initialize file logger.")
-                        as Box<dyn SharedLogger>,
-                )
-            };
-
-        let (logger, rl): (Box<dyn SharedLogger + 'static>, _) = if advanced_config.commands.use_tty
-            && stdin().is_terminal()
-        {
-            match Readline::new("$ ".to_owned()) {
-                Ok((rl, stdout)) => (WriteLogger::new(level, config.build(), stdout), Some(rl)),
-                Err(e) => {
-                    log::warn!(
-                        "Failed to initialize console input ({e}); falling back to simple logger"
-                    );
-                    (SimpleLogger::new(level, config.build()), None)
-                }
-            }
-        } else {
-            (SimpleLogger::new(level, config.build()), None)
-        };
-
-        Some((ReadlineLogWrapper::new(logger, file_logger, rl), level))
-    } else {
         None
-    };
-
-    if LOGGER_IMPL.set(logger).is_err() {
-        panic!("Failed to set logger. already initialized");
     }
-    */
 }
 
 pub static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
-pub static STOP_INTERRUPT: LazyLock<Notify> = LazyLock::new(Notify::new);
+pub static STOP_INTERRUPT: LazyLock<CancellationToken> = LazyLock::new(CancellationToken::new);
 
 pub fn stop_server() {
     SHOULD_STOP.store(true, Ordering::Relaxed);
-    STOP_INTERRUPT.notify_waiters();
+    STOP_INTERRUPT.cancel();
 }
 
 fn resolve_some<T: Future, D, F: FnOnce(D) -> T>(
@@ -516,7 +450,7 @@ impl PumpkinServer {
             },
 
             // Branch for the global stop signal
-            () = STOP_INTERRUPT.notified() => {
+            () = STOP_INTERRUPT.cancelled() => {
                 return false;
             }
         }
@@ -578,12 +512,9 @@ fn setup_console(
                 break;
             }
 
-            let t1 = rl.readline();
-            let t2 = STOP_INTERRUPT.notified();
-
             let result = select! {
-                line = t1 => Some(line),
-                () = t2 => None,
+                line = rl.readline() => Some(line),
+                () = STOP_INTERRUPT.cancelled() => None,
             };
 
             let Some(result) = result else {

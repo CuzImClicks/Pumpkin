@@ -70,7 +70,6 @@ pub mod data;
 pub mod entity;
 pub mod error;
 pub mod item;
-pub mod logging;
 pub mod net;
 pub mod plugin;
 pub mod server;
@@ -108,7 +107,7 @@ async fn main() {
     let basic_config = BasicConfiguration::load(&config_dir);
     let advanced_config = AdvancedConfiguration::load(&config_dir);
 
-    pumpkin::init_logger(&advanced_config);
+    let file_guard = pumpkin::init_logger(&advanced_config); // the file guard flushes on drop
 
     // Logger is now handled by tracing subscriber with LogTracer bridge
 
@@ -166,9 +165,8 @@ async fn main() {
             String::new()
         }
     );
-
     pumpkin_server.start().await;
-    log::info!("The server has stopped.");
+    drop(file_guard); // this has to be the last thing to drop otherwise the logging will not work
 }
 
 fn handle_interrupt() {
