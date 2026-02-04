@@ -7,10 +7,12 @@ pub mod chunker;
 pub mod explosion;
 pub mod loot;
 pub mod portal;
+pub mod tick_data;
 pub mod time;
 
 use crate::block::RandomTickArgs;
 use crate::world::loot::LootContextParameters;
+use crate::world::tick_data::TickData;
 use crate::{block::BlockEvent, entity::item::ItemEntity};
 use crate::{
     block::{
@@ -34,7 +36,7 @@ use bytes::BufMut;
 use crossbeam::queue::SegQueue;
 use explosion::Explosion;
 use pumpkin_config::BasicConfiguration;
-use pumpkin_data::block_properties::is_air;
+use pumpkin_data::block_properties::{has_random_ticks, is_air};
 use pumpkin_data::chunk_gen_settings::GenerationSettings;
 use pumpkin_data::data_component_impl::EquipmentSlot;
 use pumpkin_data::dimension::Dimension;
@@ -111,6 +113,7 @@ use pumpkin_util::{
 };
 use pumpkin_world::chunk::palette::BlockPalette;
 use pumpkin_world::inventory::Clearable;
+use pumpkin_world::tick::ScheduledTick;
 use pumpkin_world::world::{GetBlockError, WorldFuture};
 use pumpkin_world::{
     BlockStateId, CURRENT_BEDROCK_MC_VERSION, biome, block::entities::BlockEntity,
@@ -119,8 +122,9 @@ use pumpkin_world::{
 use pumpkin_world::{chunk::ChunkData, world::BlockAccessor};
 use pumpkin_world::{level::Level, tick::TickPriority};
 use pumpkin_world::{world::BlockFlags, world_info::LevelData};
+use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
-use rand::{RngExt, rng};
+use rand::{RngExt, SeedableRng, rng};
 use scoreboard::Scoreboard;
 use time::LevelTime;
 use tokio::sync::Mutex;
@@ -197,6 +201,7 @@ pub struct World {
     unsent_block_changes: Mutex<HashMap<BlockPos, u16>>,
     /// POI storage for fast portal lookups
     pub portal_poi: Mutex<portal::PortalPoiStorage>,
+    tick_data: tokio::sync::Mutex<TickData>,
 }
 
 impl PartialEq for World {
@@ -242,6 +247,7 @@ impl World {
             decrease_block_light_queue: SegQueue::new(),
             increase_block_light_queue: SegQueue::new(),
             server,
+            tick_data: Mutex::new(TickData::default()),
         }
     }
 
@@ -713,8 +719,16 @@ impl World {
     }
 
     pub async fn tick_chunks(self: &Arc<Self>) {
-        let tick_data = self.level.get_tick_data().await;
-        for scheduled_tick in tick_data.block_ticks {
+        self.calculate_tick_data().await;
+        let mut ticks = self.tick_data.lock().await;
+        let TickData {
+            block_ticks,
+            fluid_ticks,
+            random_ticks,
+            block_entities,
+            cloned_chunks: _,
+        } = &mut *ticks;
+        for scheduled_tick in block_ticks.drain(..) {
             let block = self.get_block(&scheduled_tick.position).await;
             if let Some(pumpkin_block) = self.block_registry.get_pumpkin_block(block.id) {
                 pumpkin_block
@@ -726,7 +740,7 @@ impl World {
                     .await;
             }
         }
-        for scheduled_tick in tick_data.fluid_ticks {
+        for scheduled_tick in fluid_ticks.drain(..) {
             let fluid = self.get_fluid(&scheduled_tick.position).await;
             if let Some(pumpkin_fluid) = self.block_registry.get_pumpkin_fluid(fluid.id) {
                 pumpkin_fluid
@@ -735,7 +749,7 @@ impl World {
             }
         }
 
-        for scheduled_tick in tick_data.random_ticks {
+        for scheduled_tick in random_ticks.drain(..) {
             let block = self.get_block(&scheduled_tick.position).await;
             if let Some(pumpkin_block) = self.block_registry.get_pumpkin_block(block.id) {
                 pumpkin_block
@@ -794,9 +808,76 @@ impl World {
 
         let world: Arc<dyn SimpleWorld> = self.clone();
 
-        for block_entity in tick_data.block_entities {
+        for block_entity in block_entities.drain(..) {
             block_entity.tick(&world).await;
         }
+    }
+
+    /// Calculate Block-, Fluid- and Randomticks and write into the `tick_data` field
+    pub async fn calculate_tick_data(&self) {
+        let random_tick_speed = { self.level_info.load().game_rules.random_tick_speed };
+        let mut ticks = self.tick_data.lock().await;
+
+        debug_assert!(ticks.block_ticks.is_empty());
+        debug_assert!(ticks.fluid_ticks.is_empty());
+        debug_assert!(ticks.random_ticks.is_empty());
+        debug_assert!(ticks.block_entities.is_empty());
+        debug_assert!(ticks.cloned_chunks.is_empty());
+
+        let mut rng = SmallRng::from_rng(&mut rand::rng());
+        ticks
+            .cloned_chunks
+            .extend(self.level.loaded_chunks.iter().map(|x| x.value().clone()));
+        let TickData {
+            block_ticks,
+            fluid_ticks,
+            random_ticks,
+            block_entities,
+            cloned_chunks,
+        } = &mut *ticks;
+        for chunk in cloned_chunks.drain(..) {
+            let mut chunk = chunk.write().await;
+            block_ticks.append(&mut chunk.block_ticks.step_tick());
+            fluid_ticks.append(&mut chunk.fluid_ticks.step_tick());
+
+            let chunk = chunk.downgrade();
+
+            let chunk_base_x = chunk.x * 16;
+            let chunk_base_z = chunk.z * 16;
+            for i in 0..chunk.section.sections.len() {
+                for _ in 0..random_tick_speed {
+                    let r = rng.random::<u32>();
+                    let x_offset = (r & 0xF) as i32;
+                    let y_offset = ((r >> 4) & 0xF) as i32 - 32;
+                    let z_offset = (r >> 8 & 0xF) as i32;
+
+                    let random_pos = BlockPos::new(
+                        chunk_base_x + x_offset,
+                        i as i32 * 16 + y_offset,
+                        chunk_base_z + z_offset,
+                    );
+
+                    let block_id = chunk
+                        .section
+                        .get_block_absolute_y(x_offset as usize, random_pos.0.y, z_offset as usize)
+                        .unwrap_or(Block::AIR.default_state.id);
+
+                    if has_random_ticks(block_id) {
+                        random_ticks.push(ScheduledTick {
+                            position: random_pos,
+                            delay: 0,
+                            priority: TickPriority::Normal,
+                            value: (),
+                        });
+                    }
+                }
+            }
+
+            block_entities.extend(chunk.block_entities.values().cloned());
+        }
+
+        block_ticks.sort_unstable();
+        fluid_ticks.sort_unstable();
     }
 
     pub async fn get_fluid_collisions(self: &Arc<Self>, bounding_box: BoundingBox) -> Vec<&Fluid> {
