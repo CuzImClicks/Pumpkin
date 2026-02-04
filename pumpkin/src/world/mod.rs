@@ -735,7 +735,7 @@ impl World {
             block_entities,
             cloned_chunks: _,
         } = &mut *ticks;
-        for scheduled_tick in block_ticks.drain(..) {
+        for scheduled_tick in block_ticks {
             let block = self.get_block(&scheduled_tick.position).await;
             if let Some(pumpkin_block) = self.block_registry.get_pumpkin_block(block.id) {
                 pumpkin_block
@@ -747,7 +747,7 @@ impl World {
                     .await;
             }
         }
-        for scheduled_tick in fluid_ticks.drain(..) {
+        for scheduled_tick in fluid_ticks {
             let fluid = self.get_fluid(&scheduled_tick.position).await;
             if let Some(pumpkin_fluid) = self.block_registry.get_pumpkin_fluid(fluid.id) {
                 pumpkin_fluid
@@ -756,7 +756,7 @@ impl World {
             }
         }
 
-        for scheduled_tick in random_ticks.drain(..) {
+        for scheduled_tick in random_ticks {
             let block = self.get_block(&scheduled_tick.position).await;
             if let Some(pumpkin_block) = self.block_registry.get_pumpkin_block(block.id) {
                 pumpkin_block
@@ -815,7 +815,7 @@ impl World {
 
         let world: Arc<dyn SimpleWorld> = self.clone();
 
-        for block_entity in block_entities.drain(..) {
+        for block_entity in block_entities {
             block_entity.tick(&world).await;
         }
     }
@@ -824,12 +824,7 @@ impl World {
     pub async fn calculate_tick_data(&self) {
         let random_tick_speed = { self.level_info.load().game_rules.random_tick_speed };
         let mut ticks = self.tick_data.lock().await;
-
-        debug_assert!(ticks.block_ticks.is_empty());
-        debug_assert!(ticks.fluid_ticks.is_empty());
-        debug_assert!(ticks.random_ticks.is_empty());
-        debug_assert!(ticks.block_entities.is_empty());
-        debug_assert!(ticks.cloned_chunks.is_empty());
+        ticks.clear();
 
         let mut rng = SmallRng::from_rng(&mut rand::rng());
         ticks
@@ -842,7 +837,7 @@ impl World {
             block_entities,
             cloned_chunks,
         } = &mut *ticks;
-        for chunk in cloned_chunks.drain(..) {
+        for chunk in cloned_chunks {
             let mut chunk = chunk.write().await;
             block_ticks.append(&mut chunk.block_ticks.step_tick());
             fluid_ticks.append(&mut chunk.fluid_ticks.step_tick());
